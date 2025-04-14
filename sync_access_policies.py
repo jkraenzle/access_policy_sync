@@ -3,7 +3,7 @@
 # The class definition requires installation of the Python requests library in the Python installation.
 # This can be done using the command:
 # pip install requests
-# pip install yaml
+# pip install pyyaml
 
 import argparse
 import logging as log

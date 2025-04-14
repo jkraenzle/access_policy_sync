@@ -1,0 +1,6 @@
+customer_id: 218923923432475520
+client_id: "ohR5NNm2OEDyNjV4sMd2OkdzQQZmNOAkWkS2MtkjasdfkjDksSDFWWZiLDSFYmJjMzEwNjEDSF=="
+client_secret: "ExD2a5n99!%rxU@lSaXswB%RFSDFD57:"
+target: "MSP"
+skiplist:
+ - "Default"

@@ -7,8 +7,8 @@ in which config.txt is a YAML file with the entries:
 
 ```
 customer_id: <ZPA tenant ID>
-client_id: <ZPA API client ID>
-client_secret: <ZPA client secret>
+client_id: "<ZPA API client ID>"
+client_secret: "<ZPA API client secret>"
 target: <target Microtenant name>
 skiplist:
 - "Default"

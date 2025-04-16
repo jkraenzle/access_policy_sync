@@ -3,7 +3,7 @@
 # The class definition requires installation of the Python requests library in the Python installation.
 # This can be done using the command:
 # pip install requests
-# pip install pyyaml
+# pip install yaml
 
 import argparse
 import logging as log
@@ -178,7 +178,9 @@ class ZPATenant:
 				data = response.json()
 				return data
 			elif response.status_code == 201:
+				data = response.json()
 				self.log.debug(f"[{self.class_name}] Created. No content returned.")
+				return data
 			elif response.status_code == 204:
 				self.log.debug(f"[{self.class_name}] Successful. No content returned.")
 				return response
@@ -352,6 +354,20 @@ class ZPATenant:
 
 		return shared_application_segments
 
+	def share_application_segment_to_microtenant(self, application_id, source_microtenant_id, target_microtenant_id):
+
+		try:
+
+			url = f"/v1/admin/customers/{self.customer_id}/application/{application_id}/share?microtenantId={source_microtenant_id}"
+
+			target_microtenant_obj = {"shareToMicrotenants": [target_microtenant_id]}
+			response = self.action_path("put", url, target_microtenant_obj)
+
+		except requests.exceptions.RequestException as e:
+			raise SystemExit(e) from None
+
+		return response
+
 	def search_application_segments(self, search_term, microtenant_id=None):
 		try:
 
@@ -444,6 +460,7 @@ class ZPATenant:
 							source_condition_operands = source_condition['operands']
 							target_condition_operands = target_condition['operands']
 							operands_left_to_match = copy.deepcopy(source_condition_operands)
+							operands_removed = 0
 							if len(source_condition_operands) != len(target_condition_operands):
 								continue
 							for j, source_condition_operand in enumerate(source_condition_operands):
@@ -453,11 +470,13 @@ class ZPATenant:
 										and (source_condition_operand['rhs'] == target_condition_operand['rhs']):
 										if (source_condition_operand['objectType'] == 'APP' and source_condition_operand['name'] == target_condition_operand['name']) \
 											or (source_condition_operand['objectType'] == 'SCIM_GROUP' and source_condition_operand['idpName'] == target_condition_operand['idpName']):
-											del operands_left_to_match[j]
+											del operands_left_to_match[j - operands_removed]
+											operands_removed += 1
 											break
 										else:
-											del operands_left_to_match[j]
-										break
+											del operands_left_to_match[j - operands_removed]
+											operands_removed += 1
+											break
 
 							if len(operands_left_to_match) > 0:
 								#self.log.debug(f"[{self.class_name}] Yet to find matching target for {operands_left_to_match}. Iterating ...")
@@ -550,28 +569,40 @@ class ZPATenant:
 
 		return application_segments	
 
-	def get_access_policies_using_shared_application_segments(self, shared_application_segments, microtenant_id=None):
+	def force_share_of_application_segments_in_access_policies(self, access_policies, source_microtenant_id, target_microtenant_id):
+		# Ensure that all Access Policies have Application Segments being shared
 
+		try:	
+			# Get list of currently shared Application Segments in Microtenant
+			shared_application_segments = self.get_shared_application_segments(microtenant_id=source_microtenant_id)
+
+			# Get current list of shared segment IDs for a quick object to check
+			shared_application_segment_ids = []
+			for shared_application_segment in shared_application_segments:
+				shared_application_segment_ids.append(shared_application_segment['id'])
+	
+			access_policies_using_shared_segments = []
+			# Find which access policies have shared Application Segments and which need to be updated
+			for access_policy in access_policies:
+				application_segment_dict = self.get_application_segments_in_access_policy(access_policy)
+				self.log.debug(f"[{self.class_name}] Access Policy has Application Segments: {application_segment_dict}")
+
+				for application_segment_id, application_segment_name in application_segment_dict.items():
+					if application_segment_id not in shared_application_segment_ids:
+						self.log.info(f"[{self.class_name}] Sharing missing Application Segment {application_segment_name} to target Microtenant {target_microtenant_id}.")
+						self.share_application_segment_to_microtenant(application_segment_id, source_microtenant_id, target_microtenant_id)
+
+		except requests.exceptions.RequestException as e:
+			raise SystemExit(e) from None
+			
+		return
+	
+	def get_access_policies_from_source_microtenants(self, microtenant_id=None):
+
+		# Get all Access Policies from source tenant
 		access_policies = self.get_access_policies(microtenant_id=microtenant_id)
-	
-		shared_application_segment_ids = []
-		for shared_application_segment in shared_application_segments:
-			shared_application_segment_ids.append(shared_application_segment['id'])
-	
-		access_policies_using_shared_segments = []
-		# Find which access policies have shared Application Segments
-		for access_policy in access_policies:
-			add_access_policy = True
-			application_segment_dict = self.get_application_segments_in_access_policy(access_policy)
-			self.log.debug(f"[self.class_name] Access Policy has Application Segments: {application_segment_dict}")
-			for application_segment_id, application_segment_name in application_segment_dict.items():
-				if application_segment_id not in shared_application_segment_ids:
-					self.log.error(f"[self.class_name] Share missing Application Segment {application_segment_name} to target Microtenant {microtenant_id}.")
-					add_access_policy = False
-			if add_access_policy == True:
-				access_policies_using_shared_segments.append(access_policy)
 
-		return access_policies_using_shared_segments
+		return access_policies
 
 	def clean_access_policy_object(self, object):
 		keys_to_pop = ['id', 'modifiedTime', 'creationTime', 'modifiedBy'] 
@@ -626,8 +657,6 @@ class ZPATenant:
 			policy_set_id = self.get_policy_set_id(microtenant_id=microtenant_id) 
 			cleaned_access_policy["policySetId"] = policy_set_id
 			
-			cleaned_access_policy["ruleOrder"] = rule_order
-
 			# Update name to ensure there are no duplicate Access Policy names across Microtenants
 			cleaned_access_policy["name"] = self.get_clean_access_policy_name(cleaned_access_policy)
 
@@ -635,6 +664,10 @@ class ZPATenant:
 			if microtenant_id != None:
 				url = url + f"?microtenantId={microtenant_id}"
 			response = self.action_path("post", url, cleaned_access_policy)
+
+			if response != None:
+				self.reorder_access_policy(response, rule_order, microtenant_id=microtenant_id)
+
 			return response
 
 		except requests.exceptions.RequestException as e:
@@ -657,12 +690,11 @@ class ZPATenant:
 			if microtenant_id != None:
 				url = url + f"?microtenantId={microtenant_id}"
 			response = self.action_path("put", url, cleaned_access_policy)
-			return response
 
 		except requests.exceptions.RequestException as e:
 			raise SystemExit(e) from None
 
-		return None
+		return response
 
 	def reorder_access_policy(self, access_policy, rule_order, microtenant_id=None):
 		try:
@@ -674,9 +706,10 @@ class ZPATenant:
 			if microtenant_id != None:
 				url = url + f"?microtenantId={microtenant_id}"
 			response = self.action_path("put", url)
-			return response
 		except requests.exceptions.RequestException as e:
 			raise SystemExit(e) from None
+
+		return response
 
 	def delete_access_policy(self, access_policy_to_delete, microtenant_id=None):
 
@@ -890,10 +923,6 @@ def sync():
 	log.info(f"[Access Policy Sync] There {'are' if target_access_policy_count != 1 else 'is'} {target_access_policy_count} existing target Microtenant {'policies' if target_access_policy_count != 1 else 'policy'}")
 	#log.debug(f"[Access Policy Sync] Target Access Policies: {target_access_policies}")
 
-	##### Get shared Application Segment IDs in target tenant #####
-	shared_application_segments = tenant.get_shared_application_segments(microtenant_id=target_microtenant_id)
-	#log.debug(f"[Access Policy Sync] Shared Application Segments: {shared_application_segments}")
-
 	##### Get all Access Policies using shared Application Segments in supporting tenants #####
 	log.info("[Access Policy Sync] The following Microtenants have valid source policies to be synchronized with target Microtenant")
 	source_access_policies = []
@@ -909,8 +938,11 @@ def sync():
 			return
 
 		##### Get all Access Policies in source tenant #####
-		microtenant_policies = tenant.get_access_policies_using_shared_application_segments(shared_application_segments, microtenant_id=microtenant_id)
+		microtenant_policies = tenant.get_access_policies_from_source_microtenants(microtenant_id=microtenant_id)
 		log.info(f"[Access Policy Sync] {len(microtenant_policies)} valid source policies in Microtenant {microtenant['name']}")
+
+		##### Force Application Segment sharing for these Access Policies #####
+		tenant.force_share_of_application_segments_in_access_policies(microtenant_policies, microtenant_id, target_microtenant_id)
 
 		##### Aggregate all source Access Policies #####
 		source_access_policies.extend(microtenant_policies)

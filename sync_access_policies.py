@@ -268,7 +268,7 @@ class ZPATenant:
 
 		return None
 
-	def get_microtenant_name_from_application_segment_in_access_policy(self, access_policy):
+	def get_microtenant_name_from_condition_in_access_policy(self, access_policy):
 		
 		app_segment_microtenant_id = None
 		if access_policy != None:
@@ -279,10 +279,9 @@ class ZPATenant:
 						operands = condition['operands']
 						for operand in operands:
 							if 'objectType' in operand:
-								if operand['objectType'] == 'APP':
-									if 'microtenantId' in operand:
-										app_segment_microtenant_id = operand['microtenantId']
-										break
+								if 'microtenantId' in operand:
+									app_segment_microtenant_id = operand['microtenantId']
+									break
 		else:
 			self.log.debug(f"[self.class_name] Access Policy is None when attempting to get name.")
 
@@ -435,6 +434,88 @@ class ZPATenant:
 
 	# ***** Access Policies ***** #
 
+	def convert_access_policy_v1_to_v2(self, access_policy_v1):
+
+		# Different Object Types in Conditions for version 2 Access Policies
+		OBJ_TYPE1 = ['APP', 'APP_GROUP'] # values are grouped
+		OBJ_TYPE2 = ['CONSOLE', 'MACHINE_GRP', 'LOCATION', 'BRANCH_CONNECTOR_GROUP', 'EDGE_CONNECTOR_GROUP', 'CLIENT_TYPE'] # entryValues are combined
+		OBJ_TYPE3 = ['SAML', 'SCIM', 'SCIM_GRP'] # Independent operands; entryValues are one per operand
+		OBJ_TYPE4 = ['POSTURE', 'COUNTRY_CODE', 'TRUSTED_NETWORK', 'PLATFORM', 'RISK_FACTOR_TYPE', 'CHROME_ENTERPRISE'] # Independent operands; values are one per operand
+
+		values_dict = {}
+		
+		# Aggregate required entries from Access Policy v1 and apply at end
+		if 'conditions' in access_policy_v1:
+			for condition_v1 in access_policy_v1['conditions']:
+				if 'operands' in condition_v1:
+					for operand_v1 in condition_v1['operands']:
+						if 'objectType' in operand_v1:
+							obj_type = operand_v1['objectType']
+							if obj_type not in values_dict:
+								values_dict[obj_type] = []
+
+							if obj_type in OBJ_TYPE1:
+								if 'rhs' in operand_v1:
+									values_dict[obj_type].append(operand_v1['rhs'])
+
+							elif obj_type in OBJ_TYPE2:
+								if 'rhs' in operand_v1:
+									values_dict[obj_type].append(operand_v1['rhs'])
+								
+							elif obj_type in OBJ_TYPE3:
+								if 'rhs' in operand_v1 and 'lhs' in operand_v1:
+									values_dict[obj_type].append([operand_v1['lhs'], operand_v1['rhs']])
+
+							elif obj_type in OBJ_TYPE4:
+								if 'rhs' in operand_v1 and 'lhs' in operand_v1:
+									values_dict[obj_type].append([operand_v1['lhs'], operand_v1['rhs']])
+							else:
+								pass ### jkraenzle
+
+		access_policy_v2 = {}
+		#copied_fields = ["name", "description", "action", "operator", "policySetId", ]
+		#copied_fields = ["name", "ruleOrder", "priority", "policyType", "operator", "action", "customMsg", "disabled", "extranetEnabled", "policySetId", "defaultRuleName", "defaultRule", "microtenantId"]
+		copied_fields = ["policySetId", "name", "description", "action", "customMsg", "microtenantId"]
+		for field in copied_fields:
+			if field in access_policy_v1:
+				access_policy_v2[field] = access_policy_v1[field]
+
+		conditions_v2 = []
+
+		for obj_type, values in values_dict.items():
+			condition_v2 = {}
+			
+			operands_v2 = []
+			if obj_type in OBJ_TYPE1:
+				operand_v2['objectType'] = key
+				operand_v2['values'] = values
+				operands_v2.append(operand_v2)
+			if obj_type in OBJ_TYPE2:
+				operand_v2 = {}
+				operand_v2['objectType'] = key
+				operand_v2['entryValues'] = [{'lhs':v[0], 'rhs':v[1]} for v in values]
+				operands_v2.append(operand_v2)
+			if obj_type in OBJ_TYPE3:
+				for value in values:
+					operand_v2 = {}
+					operand_v2['objectType'] = key
+					operand_v2['values'] = value
+					operands_v2.append(operand_v2)
+			if obj_type in OBJ_TYPE4:
+				for values in values:
+					operand_v2 = {}
+					operand_v2['objectType'] = key
+					operand_v2['entryValues'] = [{'lhs':v[0], 'rhs':v[1]} for v in values]
+					operand_v2['microtenantId'] = operand_v1['microtenantId']
+					operands_v2.append(operand_v2)
+
+			condition_v2['operands'] = operands_v2
+			conditions_v2.append(condition_v2)
+
+		access_policy_v2['conditions'] = conditions_v2
+
+		return access_policy_v2
+
 	def compare_access_policy_conditions(self, source_access_policy, target_access_policy):
 
 		if 'conditions' in source_access_policy and 'conditions' in target_access_policy:
@@ -507,6 +588,10 @@ class ZPATenant:
 		# return 1 for partly matching
 		# return 0
 
+		#self.log.debug("Comparing two Policies")
+		#self.log.debug(f"Source: {source_access_policy}")
+		#self.log.debug(f"Target: {target_access_policy}")
+
 		source_comparison_name = self.get_clean_access_policy_name(source_access_policy)
 
 		if 'name' in target_access_policy and source_comparison_name != None:
@@ -520,6 +605,21 @@ class ZPATenant:
 		
 		return 0
 
+	def get_access_policy(self, policy_set_id, rule_id, microtenant_id=None):
+
+		try:
+
+			
+			url = f"/v1/admin/customers/{self.customer_id}/policySet/{policy_set_id}/rule/{rule_id}"
+			if microtenant_id != None:
+				url += f"?microtenantId={microtenant_id}"
+
+			response = self.action_path("get", url)
+
+		except requests.exceptions.RequestException as e:
+			raise SystemExit(e) from None
+
+		return response
 
 	def get_access_policies(self, microtenant_id=None):
 
@@ -605,7 +705,7 @@ class ZPATenant:
 		return access_policies
 
 	def clean_access_policy_object(self, object):
-		keys_to_pop = ['id', 'modifiedTime', 'creationTime', 'modifiedBy'] 
+		keys_to_pop = ['id', 'modifiedTime', 'creationTime', 'modifiedBy', 'ruleOrder'] 
 		
 		for key_to_pop in keys_to_pop:
 			if key_to_pop in object:
@@ -644,7 +744,7 @@ class ZPATenant:
 
 	def get_clean_access_policy_name(self, access_policy):
 
-		microtenant_name = self.get_microtenant_name_from_application_segment_in_access_policy(access_policy)
+		microtenant_name = self.get_microtenant_name_from_condition_in_access_policy(access_policy)
 		return microtenant_name + " - " + access_policy["name"]
 
 	def add_access_policy_for_shared_application_segment(self, new_access_policy, microtenant_id=None, rule_order=1):
@@ -679,17 +779,25 @@ class ZPATenant:
 
 		try:
 			# Remove existing metadata related to specific tenant instance
+			#cleaned_access_policy = self.convert_access_policy_v1_to_v2(access_policy_to_update)
 			cleaned_access_policy = self.clean_access_policy(access_policy_to_update)
 
+			cleaned_access_policy["id"] = rule_id
 			policy_set_id = self.get_policy_set_id(microtenant_id=microtenant_id)
 			cleaned_access_policy["policySetId"] = policy_set_id
 
-			cleaned_access_policy["ruleOrder"] = rule_order
+			# Update name to ensure there are no duplicate Access Policy names across Microtenants
+			cleaned_access_policy["name"] = self.get_clean_access_policy_name(cleaned_access_policy)
 
-			url = f"/v2/admin/customers/{self.customer_id}/policySet/{policy_set_id}/rule/{rule_id}"
+			url = f"/v1/admin/customers/{self.customer_id}/policySet/{policy_set_id}/rule/{rule_id}"
 			if microtenant_id != None:
 				url = url + f"?microtenantId={microtenant_id}"
 			response = self.action_path("put", url, cleaned_access_policy)
+
+			if response != None:
+				# Get newly updated rule
+				access_policy = self.get_access_policy(policy_set_id, rule_id, microtenant_id=microtenant_id)
+				self.reorder_access_policy(access_policy, rule_order, microtenant_id=microtenant_id)
 
 		except requests.exceptions.RequestException as e:
 			raise SystemExit(e) from None
@@ -699,13 +807,16 @@ class ZPATenant:
 	def reorder_access_policy(self, access_policy, rule_order, microtenant_id=None):
 		try:
 			policy_set_id = self.get_policy_set_id(microtenant_id=microtenant_id)
-			rule_id = access_policy['id']
+			if 'id' in access_policy:
+				rule_id = access_policy['id']
+			else:
+				self.log.debug(f"[{self.class_name}] Access Policy does not contain 'id': {access_policy}")
 
 			url = f"/v1/admin/customers/{self.customer_id}/policySet/{policy_set_id}/rule/{rule_id}/reorder/{rule_order}"
-
 			if microtenant_id != None:
 				url = url + f"?microtenantId={microtenant_id}"
 			response = self.action_path("put", url)
+
 		except requests.exceptions.RequestException as e:
 			raise SystemExit(e) from None
 
@@ -833,7 +944,7 @@ def get_parameters():
 	parser = argparse.ArgumentParser(description="Script to update cloud applications")
 	parser.add_argument("--config", required=False)
 	parser.add_argument("--ssl_verify", default=False, required=False)
-	parser.add_argument("--log_level", default="INFO", required=False)
+	parser.add_argument("--log_level", default="DEBUG", required=False)
 	args = parser.parse_args()
 
 	parameters = {}

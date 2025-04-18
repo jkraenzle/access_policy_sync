@@ -13,17 +13,18 @@ import time
 import json
 import getpass
 import copy
+import os
 import inspect
 from typing import Any,IO
 import yaml
-import os
 
 import requests
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+import ipaddress
 
-# ***** ZPA Tenant Class *****
+# ***** ZPA Tenant & Related Classes *****
 
 class ZPATenant:
 	'''
@@ -341,10 +342,11 @@ class ZPATenant:
 		return final_response
 
 
-	def get_shared_application_segments(self, microtenant_id=None):
+	def get_shared_application_segments(self, microtenant_id=None, application_segments=None):
 
-		application_segments = self.get_all_application_segments(microtenant_id=microtenant_id)
-		#self.log.debug(f"[self.class_name] All Application Segments in Microtenant {microtenant_id}: {application_segments}")
+		if application_segments == None:
+			application_segments = self.get_all_application_segments(microtenant_id=microtenant_id)
+			#self.log.debug(f"[self.class_name] All Application Segments in Microtenant {microtenant_id}: {application_segments}")
 
 		shared_application_segments = []
 		for application_segment in application_segments:
@@ -433,88 +435,6 @@ class ZPATenant:
 			return None
 
 	# ***** Access Policies ***** #
-
-	def convert_access_policy_v1_to_v2(self, access_policy_v1):
-
-		# Different Object Types in Conditions for version 2 Access Policies
-		OBJ_TYPE1 = ['APP', 'APP_GROUP'] # values are grouped
-		OBJ_TYPE2 = ['CONSOLE', 'MACHINE_GRP', 'LOCATION', 'BRANCH_CONNECTOR_GROUP', 'EDGE_CONNECTOR_GROUP', 'CLIENT_TYPE'] # entryValues are combined
-		OBJ_TYPE3 = ['SAML', 'SCIM', 'SCIM_GRP'] # Independent operands; entryValues are one per operand
-		OBJ_TYPE4 = ['POSTURE', 'COUNTRY_CODE', 'TRUSTED_NETWORK', 'PLATFORM', 'RISK_FACTOR_TYPE', 'CHROME_ENTERPRISE'] # Independent operands; values are one per operand
-
-		values_dict = {}
-		
-		# Aggregate required entries from Access Policy v1 and apply at end
-		if 'conditions' in access_policy_v1:
-			for condition_v1 in access_policy_v1['conditions']:
-				if 'operands' in condition_v1:
-					for operand_v1 in condition_v1['operands']:
-						if 'objectType' in operand_v1:
-							obj_type = operand_v1['objectType']
-							if obj_type not in values_dict:
-								values_dict[obj_type] = []
-
-							if obj_type in OBJ_TYPE1:
-								if 'rhs' in operand_v1:
-									values_dict[obj_type].append(operand_v1['rhs'])
-
-							elif obj_type in OBJ_TYPE2:
-								if 'rhs' in operand_v1:
-									values_dict[obj_type].append(operand_v1['rhs'])
-								
-							elif obj_type in OBJ_TYPE3:
-								if 'rhs' in operand_v1 and 'lhs' in operand_v1:
-									values_dict[obj_type].append([operand_v1['lhs'], operand_v1['rhs']])
-
-							elif obj_type in OBJ_TYPE4:
-								if 'rhs' in operand_v1 and 'lhs' in operand_v1:
-									values_dict[obj_type].append([operand_v1['lhs'], operand_v1['rhs']])
-							else:
-								pass ### jkraenzle
-
-		access_policy_v2 = {}
-		#copied_fields = ["name", "description", "action", "operator", "policySetId", ]
-		#copied_fields = ["name", "ruleOrder", "priority", "policyType", "operator", "action", "customMsg", "disabled", "extranetEnabled", "policySetId", "defaultRuleName", "defaultRule", "microtenantId"]
-		copied_fields = ["policySetId", "name", "description", "action", "customMsg", "microtenantId"]
-		for field in copied_fields:
-			if field in access_policy_v1:
-				access_policy_v2[field] = access_policy_v1[field]
-
-		conditions_v2 = []
-
-		for obj_type, values in values_dict.items():
-			condition_v2 = {}
-			
-			operands_v2 = []
-			if obj_type in OBJ_TYPE1:
-				operand_v2['objectType'] = key
-				operand_v2['values'] = values
-				operands_v2.append(operand_v2)
-			if obj_type in OBJ_TYPE2:
-				operand_v2 = {}
-				operand_v2['objectType'] = key
-				operand_v2['entryValues'] = [{'lhs':v[0], 'rhs':v[1]} for v in values]
-				operands_v2.append(operand_v2)
-			if obj_type in OBJ_TYPE3:
-				for value in values:
-					operand_v2 = {}
-					operand_v2['objectType'] = key
-					operand_v2['values'] = value
-					operands_v2.append(operand_v2)
-			if obj_type in OBJ_TYPE4:
-				for values in values:
-					operand_v2 = {}
-					operand_v2['objectType'] = key
-					operand_v2['entryValues'] = [{'lhs':v[0], 'rhs':v[1]} for v in values]
-					operand_v2['microtenantId'] = operand_v1['microtenantId']
-					operands_v2.append(operand_v2)
-
-			condition_v2['operands'] = operands_v2
-			conditions_v2.append(condition_v2)
-
-		access_policy_v2['conditions'] = conditions_v2
-
-		return access_policy_v2
 
 	def compare_access_policy_conditions(self, source_access_policy, target_access_policy):
 
@@ -669,6 +589,53 @@ class ZPATenant:
 
 		return application_segments	
 
+	def is_ip_address_or_subnet(self, possible_ip_data):
+
+		# Check for IP address, subnet, or range
+		try:
+			ipv4_address = ipaddress.IPv4Address(possible_ip_data)
+			return True
+		except ipaddress.AddressValueError:
+			pass
+
+		try:
+			ip_network = ipaddress.IPv4Network(possible_ip_data, strict=False)
+			return True
+		except ipaddress.AddressValueError:
+			pass
+		except ipaddress.NetmaskValueError:
+			pass
+
+		try:
+			ipv6_address = ipaddress.IPv6Address(possible_ip_data)
+			return True
+		except ipaddress.AddressValueError:
+			pass
+
+		try:
+			ip_network = ipaddress.IPv6Network(possible_ip_data, strict=False)
+			return True
+		except ipaddress.AddressValueError:
+			pass
+		except ipaddress.NetmaskValueError:
+			pass
+			
+		return False
+
+	def find_application_segment_ids_using_ip_addresses(self, application_segments):
+		
+		application_segments_with_ip_addresses = []
+		for application_segment in application_segments:
+			if 'domainNames' in application_segment:
+				possible_ip_data = application_segment['domainNames']
+				for entry in possible_ip_data:
+					if self.is_ip_address_or_subnet(entry) == True:
+						application_segments_with_ip_addresses.append(application_segment['id'])
+						self.log.debug(f"[{self.class_name}] Application Segment <{application_segment['name']}> contains an IP address or subnet.")
+						self.log.info(f"[{self.class_name}] Access Policies containing IP-based Application Segment <{application_segment['name']}> will result in the Access Policies not being synchronized.")
+						break
+		return application_segments_with_ip_addresses
+
 	def force_share_of_application_segments_in_access_policies(self, access_policies, source_microtenant_id, target_microtenant_id):
 		# Ensure that all Access Policies have Application Segments being shared
 
@@ -685,7 +652,7 @@ class ZPATenant:
 			# Find which access policies have shared Application Segments and which need to be updated
 			for access_policy in access_policies:
 				application_segment_dict = self.get_application_segments_in_access_policy(access_policy)
-				self.log.debug(f"[{self.class_name}] Access Policy has Application Segments: {application_segment_dict}")
+				#self.log.debug(f"[{self.class_name}] Access Policy has Application Segments: {application_segment_dict}")
 
 				for application_segment_id, application_segment_name in application_segment_dict.items():
 					if application_segment_id not in shared_application_segment_ids:
@@ -696,6 +663,41 @@ class ZPATenant:
 			raise SystemExit(e) from None
 			
 		return
+
+	def remove_troublesome_access_policies(self, access_policies, application_segments):
+		valid_access_policies = []
+		
+		ip_address_segment_ids = self.find_application_segment_ids_using_ip_addresses(application_segments)
+
+		for access_policy in access_policies:
+			application_segment_dict = self.get_application_segments_in_access_policy(access_policy)
+			if len(application_segment_dict) == 0:
+				self.log.debug(f"[{self.class_name}] No Application Segment configured in Access Policy: {access_policy}.")
+				self.log.error(f"[{self.class_name}] Access Policy <{access_policy['name']}> is missing an Application Segment and not going to be synchronized.")
+				continue
+			invalid_access_policy = False
+			for application_segment_id, application_segment_name in application_segment_dict.items():
+				if application_segment_id in ip_address_segment_ids:
+					invalid_access_policy = True
+					break
+
+			if invalid_access_policy == True:
+				self.log.debug(f"[{self.class_name}] Please replace IP addresses and subnets with wildcard domain or FQDN in Access Policy: {access_policy}")
+				self.log.error(f"[{self.class_name}] Access Policy <{access_policy['name']}> has at least one IP-based Application Segment and is not going to be synchronized.")
+			else:
+				valid_access_policies.append(access_policy)
+			
+		return valid_access_policies
+
+	def remove_source_microtenant_configurations(self, access_policies):
+
+		for access_policy in access_policies:
+			if 'appConnectorGroups' in access_policy:
+				access_policy.pop('appConnectorGroups')
+			if 'appServerGroups' in access_policy:
+				access_policy.pop('appServerGroups')
+
+		return access_policies
 	
 	def get_access_policies_from_source_microtenants(self, microtenant_id=None):
 
@@ -779,7 +781,6 @@ class ZPATenant:
 
 		try:
 			# Remove existing metadata related to specific tenant instance
-			#cleaned_access_policy = self.convert_access_policy_v1_to_v2(access_policy_to_update)
 			cleaned_access_policy = self.clean_access_policy(access_policy_to_update)
 
 			cleaned_access_policy["id"] = rule_id
@@ -810,7 +811,8 @@ class ZPATenant:
 			if 'id' in access_policy:
 				rule_id = access_policy['id']
 			else:
-				self.log.debug(f"[{self.class_name}] Access Policy does not contain 'id': {access_policy}")
+				self.log.error(f"[{self.class_name}] Access Policy does not contain 'id': {access_policy}")
+				return None
 
 			url = f"/v1/admin/customers/{self.customer_id}/policySet/{policy_set_id}/rule/{rule_id}/reorder/{rule_order}"
 			if microtenant_id != None:
@@ -962,39 +964,6 @@ def get_parameters():
 
 	return parameters
 
-def pull_tags_from_description(description):
-
-	tags = []
-	possible_tags = description.split('\r')
-	for possible_tag in possible_tags:
-		possible_key_value_pair = possible_tag.split(':')
-		if len(possible_key_value_pair) == 2:
-			key = possible_key_value_pair[0].strip()
-			possible_list_of_values = possible_key_value_pair[1].split(',')
-			if len(possible_list_of_values) == 1:
-				value = possible_key_value_pair[1].strip()
-			else:
-				value = possible_list_of_values
-
-			tag = {}
-			tag[key] = value
-			tags.append(tag)
-
-	if len(tags) > 0:
-		return tags
-	else:
-		return []
-
-def remove_source_microtenant_configurations(access_policies):
-
-	for access_policy in access_policies:
-		if 'appConnectorGroups' in access_policy:
-			access_policy.pop('appConnectorGroups')
-		if 'appServerGroups' in access_policy:
-			access_policy.pop('appServerGroups')
-
-	return access_policies
-
 def sync():
 
 	parameters = get_parameters()
@@ -1031,11 +1000,13 @@ def sync():
 	##### Get existing Access Policies in target tenant #####
 	target_access_policies = tenant.get_access_policies(microtenant_id=target_microtenant_id)
 	target_access_policy_count = len(target_access_policies)
-	log.info(f"[Access Policy Sync] There {'are' if target_access_policy_count != 1 else 'is'} {target_access_policy_count} existing target Microtenant {'policies' if target_access_policy_count != 1 else 'policy'}")
+	log_msg = f"[Access Policy Sync] There {'are' if target_access_policy_count != 1 else 'is'} {target_access_policy_count} existing"
+	log_msg += f" target Microtenant {'policies' if target_access_policy_count != 1 else 'policy'}"
+	log.info(log_msg)
 	#log.debug(f"[Access Policy Sync] Target Access Policies: {target_access_policies}")
 
 	##### Get all Access Policies using shared Application Segments in supporting tenants #####
-	log.info("[Access Policy Sync] The following Microtenants have valid source policies to be synchronized with target Microtenant")
+
 	source_access_policies = []
 	##### For each Microtenant #####
 	for microtenant in microtenants:
@@ -1050,20 +1021,32 @@ def sync():
 
 		##### Get all Access Policies in source tenant #####
 		microtenant_policies = tenant.get_access_policies_from_source_microtenants(microtenant_id=microtenant_id)
-		log.info(f"[Access Policy Sync] {len(microtenant_policies)} valid source policies in Microtenant {microtenant['name']}")
+
+		##### Remove Access Policies that use IP address or have no Application Segments #####
+		microtenant_application_segments = tenant.get_all_application_segments(microtenant_id=microtenant_id)
+		valid_microtenant_policies = tenant.remove_troublesome_access_policies(microtenant_policies, microtenant_application_segments)
 
 		##### Force Application Segment sharing for these Access Policies #####
-		tenant.force_share_of_application_segments_in_access_policies(microtenant_policies, microtenant_id, target_microtenant_id)
+		tenant.force_share_of_application_segments_in_access_policies(valid_microtenant_policies, microtenant_id, target_microtenant_id)
+
+		log_msg = f"[Access Policy Sync] There {'are' if len(microtenant_policies) != 1 else 'is'} {len(microtenant_policies)}"
+		log_msg += f" source {'policies' if len(microtenant_policies) != 1 else 'policy'} in Microtenant <{microtenant['name']}>"
+		log.info(log_msg)
+		log_msg = f"[Access Policy Sync] - Within the {len(microtenant_policies)} {'policies' if len(microtenant_policies) != 1 else 'policy'},"
+		log_msg += f" {len(valid_microtenant_policies)} are valid."
+		log.info(log_msg)
 
 		##### Aggregate all source Access Policies #####
-		source_access_policies.extend(microtenant_policies)
+		source_access_policies.extend(valid_microtenant_policies)
 
 	source_access_policy_count = len(source_access_policies)
-	log.info(f"[Access Policy Sync] There {'are' if source_access_policy_count != 1 else 'is'} {source_access_policy_count} existing valid source {'policies' if source_access_policy_count != 1 else 'policy'} across the source Microtenants")
+	log_msg = f"[Access Policy Sync] There {'are' if source_access_policy_count != 1 else 'is'} {source_access_policy_count} existing"
+	log_msg += f" valid source {'policies' if source_access_policy_count != 1 else 'policy'} across the source Microtenants"
+	log.info(log_msg)
 	#log.debug(f"[Access Policy Sync] Source Access Policies: {source_access_policies}")
 
 	##### Remove local Microtenant configurations from source Access Policies #####
-	source_access_policies = remove_source_microtenant_configurations(source_access_policies)
+	source_access_policies = tenant.remove_source_microtenant_configurations(source_access_policies)
 
 	##### Synchronize Access Policies #####
 	new_access_policies = []
@@ -1098,15 +1081,23 @@ def sync():
 			access_policy_order[i + 1] = {"policy":source_access_policy, "status":"new"}
 
 
-	log.info(f"[Access Policy Sync] There are {len(access_policies_with_no_changes)} policies that need no changes, although order may be updated")
-	log.info(f"[Access Policy Sync] There are {len(access_policies_to_update)} policies to update")
-	log.info(f"[Access Policy Sync] There are {len(new_access_policies)} new access policies to create")
-	log.info(f"[Access Policy Sync] There are {len(access_policies_left_to_delete)} policies to remove from target environment")
+	log_msg = f"[Access Policy Sync] - There {'is' if len(access_policies_with_no_changes) == 1 else 'are'} {len(access_policies_with_no_changes)}"
+	log_msg += f" {'policy' if len(access_policies_with_no_changes) == 1 else 'policies'} that need no changes, although order may be updated"
+	log.info(log_msg)
+	log_msg = f"[Access Policy Sync] - There {'is' if len(access_policies_to_update) == 1 else 'are'} {len(access_policies_to_update)}"
+	log_msg += f" {'policy' if len(access_policies_to_update) == 1 else 'policies'} to update"
+	log.info(log_msg)
+	log_msg = f"[Access Policy Sync] - There {'is' if len(new_access_policies) == 1 else 'are'} {len(new_access_policies)}"
+	log_msg += f" {'policy' if len(new_access_policies) == 1 else 'policies'} to create"
+	log.info(log_msg)
+	log_msg = f"[Access Policy Sync] - There {'is' if len(access_policies_left_to_delete) == 1 else 'are'} {len(access_policies_left_to_delete)}"
+	log_msg += f" {'policy' if len(access_policies_left_to_delete) == 1 else 'policies'} to remove from target environment"
+	log.info(log_msg)
 
 	##### Add in reverse order #####
-	log.info(f"[Access Policy Sync] Beginning changes to target Microtenant")
+	log.debug(f"[Access Policy Sync] Beginning changes to target Microtenant")
 	total_entries = len(access_policy_order.items())
-	counter = 2 if total_entries / 10 == 0 else total_entries / 10
+	counter = 2 if total_entries < 20 else int(total_entries / 5)
 	for i, (order, value) in enumerate(access_policy_order.items()):
 		if order % counter == 0:
 			log.debug(f"[Access Policy Sync] Processing rule {order} of {total_entries} (counting by {counter})")
@@ -1122,9 +1113,10 @@ def sync():
 		elif status == "no_change":
 			##### Update Access Policy order #####
 			tenant.reorder_access_policy(policy, order, microtenant_id=target_microtenant_id)
+	log.info(f"[Access Policy Sync] There are {total_entries} Access {'Policies' if total_entries != 1 else 'Policy'} now configured in target Microtenant")
 
 	##### Delete old Access Policies #####
-	log.info(f"[Access Policy Sync] Deleting rules no longer configured in source Microtenants")
+	log.debug(f"[Access Policy Sync] Deleting rules no longer configured in source Microtenants")
 	for access_policy_to_delete in access_policies_left_to_delete:
 		tenant.delete_access_policy(access_policy_to_delete, microtenant_id=target_microtenant_id)
 

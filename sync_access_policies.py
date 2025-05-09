@@ -964,6 +964,16 @@ def get_parameters():
 
 	return parameters
 
+def get_local_target_access_policies(target_access_policies, target_microtenant):
+
+	local_access_policies = []
+	for target_access_policy in target_access_policies:
+		if "name" in target_access_policy:
+			if target_access_policy["name"].startswith(target_microtenant):
+				local_access_policies.append(target_access_policy)
+
+	return local_access_policies
+
 def sync():
 
 	parameters = get_parameters()
@@ -1005,13 +1015,20 @@ def sync():
 	log.info(log_msg)
 	#log.debug(f"[Access Policy Sync] Target Access Policies: {target_access_policies}")
 
+	##### Get permanent local policies as defined directly in target microtenant #####
+	local_target_access_policies = get_local_target_access_policies(target_access_policies, target_microtenant)
+	local_target_access_policy_count = len(local_target_access_policies)
+	log_msg = f"[Access Policy Sync] There {'are' if local_target_access_policy_count != 1 else 'is'} {local_target_access_policy_count}"
+	log_msg += f" locally defined target Microtenant {'policies' if local_target_access_policy_count != 1 else 'policy'} to keep"
+	log.info(log_msg)
+
 	##### Get all Access Policies using shared Application Segments in supporting tenants #####
 
 	source_access_policies = []
 	##### For each Microtenant #####
 	for microtenant in microtenants:
 		##### Skip target and Default microtenants #####
-		if "id" in microtenant:
+		if 'id' in microtenant:
 			microtenant_id = microtenant['id']
 			if (microtenant_id == target_microtenant_id) or (microtenant_id in skip_microtenant_ids):
 				continue
@@ -1054,7 +1071,15 @@ def sync():
 	access_policies_with_no_changes = []
 	access_policies_left_to_delete = target_access_policies
 	access_policy_order = {}
-	for i, source_access_policy in enumerate(source_access_policies):
+
+	# Keep locally defined target policies
+	for i, local_target_access_policy in enumerate(local_target_access_policies):
+		access_policies_with_no_changes.append(local_target_access_policy)
+		access_policies_left_to_delete.remove(local_target_access_policy)
+		access_policy_order[i + 1] = {"policy":local_target_access_policy, "status":"no_change"}
+
+	# Add new source policies
+	for j, source_access_policy in enumerate(source_access_policies):
 		source_access_policy_found = False
 		for target_access_policy in target_access_policies:
 			compare_result = tenant.compare_access_policy(source_access_policy, target_access_policy)
@@ -1063,7 +1088,7 @@ def sync():
 				source_access_policy_found = True
 				access_policies_with_no_changes.append(target_access_policy)
 				access_policies_left_to_delete.remove(target_access_policy)
-				access_policy_order[i + 1] = {"policy":target_access_policy, "status":"no_change"}
+				access_policy_order[local_target_access_policy_count + j + 1] = {"policy":target_access_policy, "status":"no_change"}
 				break
 			if compare_result == 1:
 				log.debug(f"[Access Policy Sync] Found matching Access Policy {source_access_policy['name']} but it needs to be updated")
@@ -1071,14 +1096,14 @@ def sync():
 				update_policy_dict = {"rule_resource":source_access_policy, "rule_id":target_access_policy['id']} 
 				access_policies_to_update.append(update_policy_dict)
 				access_policies_left_to_delete.remove(target_access_policy)
-				access_policy_order[i + 1] = {"policy":update_policy_dict, "status":"update"}
+				access_policy_order[local_target_access_policy_count + j + 1] = {"policy":update_policy_dict, "status":"update"}
 				break
 			if compare_result == 0:
 				pass
 
 		if source_access_policy_found == False:
 			new_access_policies.append(source_access_policy)
-			access_policy_order[i + 1] = {"policy":source_access_policy, "status":"new"}
+			access_policy_order[local_target_access_policy_count + j + 1] = {"policy":source_access_policy, "status":"new"}
 
 
 	log_msg = f"[Access Policy Sync] - There {'is' if len(access_policies_with_no_changes) == 1 else 'are'} {len(access_policies_with_no_changes)}"
